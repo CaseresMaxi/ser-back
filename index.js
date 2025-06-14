@@ -59,7 +59,7 @@ app.post("/api/create-payment", async (req, res) => {
           plan_id,
         },
         back_urls: {
-          success: process.env.SUCCESS_URL,
+          success: `${process.env.BASE_URL}/api/register-payment?payment_id={payment_id}&status={status}&merchant_order_id={merchant_order_id}&user_id=${user_id}&plan_id=${plan_id}`,
           failure: process.env.FAILURE_URL,
           pending: process.env.PENDING_URL,
         },
@@ -130,6 +130,65 @@ app.post("/api/webhook", async (req, res) => {
   } catch (error) {
     console.error("Error processing webhook:", error);
     res.sendStatus(500);
+  }
+});
+
+// Endpoint para registrar pago desde el frontend tras redirección exitosa
+app.get("/api/register-payment", async (req, res) => {
+  try {
+    const {
+      payment_id,
+      status,
+      external_reference,
+      merchant_order_id,
+      user_id,
+      plan_id,
+    } = req.query;
+    if (!payment_id || !user_id || !plan_id) {
+      return res.status(400).json({ error: "Missing required params" });
+    }
+
+    // Simula obtener detalles del pago desde MercadoPago si es necesario
+    // const payment = await client.payment.get({ id: payment_id });
+
+    // Crea la suscripción y el registro de pago
+    const subscriptionData = {
+      userId: user_id,
+      planId: plan_id,
+      status: "active",
+      paymentId: payment_id,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await admin
+      .firestore()
+      .collection("subscriptions")
+      .doc(user_id)
+      .set(subscriptionData, { merge: true });
+    await admin
+      .firestore()
+      .collection("payments")
+      .add({
+        userId: user_id,
+        planId: plan_id,
+        paymentId: payment_id,
+        amount: null, // Si quieres puedes obtener el monto desde MercadoPago
+        currency: "ARS",
+        status: status || "completed",
+        merchantOrderId: merchant_order_id || null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    // Redirige al frontend después de registrar el pago
+    const frontendSuccessUrl =
+      process.env.SUCCESS_URL ||
+      "http://localhost:5173/payment/success";
+    return res.redirect(
+      `${frontendSuccessUrl}?payment_id=${payment_id}&status=${status}&user_id=${user_id}&plan_id=${plan_id}`
+    );
+  } catch (error) {
+    console.error("Error registering payment from frontend:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
