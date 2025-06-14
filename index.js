@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { MercadoPagoConfig, Preference } = require("mercadopago");
+const admin = require("firebase-admin");
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -9,7 +10,7 @@ const port = process.env.PORT || 3000;
 // Middleware
 app.use(
   cors({
-    origin: "*",
+    origin: "http://localhost:5173",
     credentials: true,
   })
 );
@@ -21,11 +22,20 @@ const client = new MercadoPagoConfig({
 });
 const preference = new Preference(client);
 
+// Initialize Firebase Admin
+const serviceAccount = require("./serviceAccountKey.json");
+
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+}
+
 // Create payment preference
 app.post("/api/create-payment", async (req, res) => {
   console.log("BODY RECIBIDO:", req.body, process.env.SUCCESS_URL);
   try {
-    const { title, price, quantity } = req.body;
+    const { title, price, quantity, user_id, plan_id, user_email } = req.body;
     console.log("BACK_URLS:", {
       success: process.env.SUCCESS_URL,
       failure: process.env.FAILURE_URL,
@@ -41,12 +51,18 @@ app.post("/api/create-payment", async (req, res) => {
             currency_id: "ARS",
           },
         ],
+        payer: user_email ? { email: user_email } : undefined,
+        metadata: {
+          user_id,
+          plan_id,
+        },
         back_urls: {
           success: process.env.SUCCESS_URL,
           failure: process.env.FAILURE_URL,
           pending: process.env.PENDING_URL,
         },
         auto_return: "approved",
+        notification_url: `${process.env.BASE_URL}/api/webhook`,
       },
     });
     res.json({
@@ -62,11 +78,55 @@ app.post("/api/create-payment", async (req, res) => {
 // Webhook to handle payment notifications
 app.post("/api/webhook", async (req, res) => {
   try {
-    // Aquí puedes manejar la notificación del pago
-    console.log("Webhook recibido:", req.body);
+    const { type, data } = req.body;
+
+    if (type === "payment") {
+      const paymentId = data.id;
+
+      // Get payment details from MercadoPago
+      const payment = await client.payment.get({ id: paymentId });
+
+      if (payment.status === "approved") {
+        // Get the user ID from the payment metadata
+        const userId = payment.metadata?.user_id;
+        const planId = payment.metadata?.plan_id;
+
+        if (userId && planId) {
+          // Create subscription and record payment
+          const subscriptionData = {
+            userId,
+            planId,
+            status: "active",
+            paymentId,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+
+          // Update subscription in database
+          await admin
+            .firestore()
+            .collection("subscriptions")
+            .doc(userId)
+            .set(subscriptionData, { merge: true });
+
+          // Record payment in database
+          await admin.firestore().collection("payments").add({
+            userId,
+            planId,
+            paymentId,
+            amount: payment.transaction_amount,
+            currency: payment.currency_id,
+            status: "completed",
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          });
+        }
+      }
+    }
+
     res.sendStatus(200);
   } catch (error) {
-    console.error(error);
+    console.error("Error processing webhook:", error);
     res.sendStatus(500);
   }
 });
