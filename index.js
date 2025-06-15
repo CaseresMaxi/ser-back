@@ -1,7 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const { MercadoPagoConfig, Preference } = require("mercadopago");
+const { MercadoPagoConfig, Preference, Payment } = require("mercadopago");
 const admin = require("firebase-admin");
 
 const app = express();
@@ -21,6 +21,7 @@ const client = new MercadoPagoConfig({
   accessToken: process.env.MERCADOPAGO_ACCESS_TOKEN,
 });
 const preference = new Preference(client);
+const payment = new Payment(client);
 
 // Initialize Firebase Admin
 if (!admin.apps.length) {
@@ -35,31 +36,45 @@ if (!admin.apps.length) {
 
 // Create payment preference
 app.post("/api/create-payment", async (req, res) => {
-  console.log("BODY RECIBIDO:", req.body, process.env.SUCCESS_URL);
+  console.log("BODY RECIBIDO:", req.body);
   try {
     const { title, price, quantity, user_id, plan_id, user_email } = req.body;
-    console.log("BACK_URLS:", {
-      success: process.env.SUCCESS_URL,
-      failure: process.env.FAILURE_URL,
-      pending: process.env.PENDING_URL,
+
+    if (!user_id || !plan_id || !user_email) {
+      return res
+        .status(400)
+        .json({
+          error: "Missing required fields: user_id, plan_id, user_email",
+        });
+    }
+
+    console.log("Creating payment for:", {
+      user_id,
+      plan_id,
+      user_email,
+      price,
     });
+
     const response = await preference.create({
       body: {
         items: [
           {
-            title: title,
+            title: title || "Plan Premium",
             unit_price: Number(price),
-            quantity: Number(quantity),
+            quantity: Number(quantity) || 1,
             currency_id: "ARS",
           },
         ],
-        payer: user_email ? { email: user_email } : undefined,
+        payer: {
+          email: user_email,
+        },
         metadata: {
           user_id,
           plan_id,
+          user_email,
         },
         back_urls: {
-          success: `${process.env.BASE_URL}/api/register-payment?payment_id={payment_id}&status={status}&merchant_order_id={merchant_order_id}&user_id=${user_id}&plan_id=${plan_id}`,
+          success: `${process.env.BASE_URL}/api/register-payment?payment_id={payment_id}&status={status}&merchant_order_id={merchant_order_id}&user_id=${user_id}&plan_id=${plan_id}&user_email=${user_email}`,
           failure: process.env.FAILURE_URL,
           pending: process.env.PENDING_URL,
         },
@@ -67,62 +82,141 @@ app.post("/api/create-payment", async (req, res) => {
         notification_url: `${process.env.BASE_URL}/api/webhook`,
       },
     });
+
+    console.log("Payment preference created:", response.id);
     res.json({
       id: response.id,
       init_point: response.init_point,
     });
   } catch (error) {
-    console.error(error);
+    console.error("Error creating payment:", error);
     res.status(500).json({ error: error.message });
   }
 });
 
+// Function to save payment to Firebase
+async function savePaymentToFirebase(paymentData, source = "webhook") {
+  try {
+    console.log(`Saving payment to Firebase from ${source}:`, paymentData);
+
+    const {
+      user_id,
+      plan_id,
+      user_email,
+      payment_id,
+      status,
+      amount,
+      currency,
+      merchant_order_id,
+      transaction_id,
+    } = paymentData;
+
+    if (!user_id || !plan_id) {
+      console.error("Missing required data for Firebase:", {
+        user_id,
+        plan_id,
+      });
+      return false;
+    }
+
+    // Define plan names
+    const planNames = {
+      basic: "Plan Básico",
+      premium: "Plan Premium",
+      professional: "Plan Profesional",
+    };
+
+    // Payment document data
+    const paymentDoc = {
+      userId: user_id,
+      userEmail: user_email || null,
+      planId: plan_id,
+      planName: planNames[plan_id] || "Plan Desconocido",
+      amount: Number(amount) || 0,
+      currency: currency || "ARS",
+      status: status === "approved" ? "completed" : status || "pending",
+      paymentMethod: "mercadopago",
+      transactionId: transaction_id || payment_id,
+      mercadopagoPaymentId: payment_id,
+      mercadopagoOrderId: merchant_order_id || null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      metadata: {
+        merchant_order_id: merchant_order_id,
+        payment_id: payment_id,
+        paymentMethod: "mercadopago",
+        status: status,
+        transactionId: transaction_id || payment_id,
+      },
+    };
+
+    // Save payment
+    await admin.firestore().collection("payments").add(paymentDoc);
+    console.log("Payment saved successfully to Firebase");
+
+    // Update subscription if payment is approved
+    if (status === "approved" || status === "completed") {
+      const subscriptionData = {
+        userId: user_id,
+        userEmail: user_email || null,
+        planId: plan_id,
+        planName: planNames[plan_id] || "Plan Desconocido",
+        status: "active",
+        paymentId: payment_id,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      await admin
+        .firestore()
+        .collection("subscriptions")
+        .doc(user_id)
+        .set(subscriptionData, { merge: true });
+
+      console.log("Subscription updated successfully");
+    }
+
+    return true;
+  } catch (error) {
+    console.error("Error saving to Firebase:", error);
+    return false;
+  }
+}
+
 // Webhook to handle payment notifications
 app.post("/api/webhook", async (req, res) => {
   try {
+    console.log("Webhook received:", req.body);
     const { type, data } = req.body;
 
     if (type === "payment") {
       const paymentId = data.id;
+      console.log("Processing payment notification:", paymentId);
 
-      // Get payment details from MercadoPago
-      const payment = await client.payment.get({ id: paymentId });
+      try {
+        // Get payment details from MercadoPago using the Payment class
+        const paymentResponse = await payment.get({ id: paymentId });
+        console.log("Payment details from MercadoPago:", paymentResponse);
 
-      if (payment.status === "approved") {
-        // Get the user ID from the payment metadata
-        const userId = payment.metadata?.user_id;
-        const planId = payment.metadata?.plan_id;
-
-        if (userId && planId) {
-          // Create subscription and record payment
-          const subscriptionData = {
-            userId,
-            planId,
-            status: "active",
-            paymentId,
-            createdAt: new Date(),
-            updatedAt: new Date(),
+        if (paymentResponse) {
+          const paymentData = {
+            user_id: paymentResponse.metadata?.user_id,
+            plan_id: paymentResponse.metadata?.plan_id,
+            user_email:
+              paymentResponse.metadata?.user_email ||
+              paymentResponse.payer?.email,
+            payment_id: paymentResponse.id,
+            status: paymentResponse.status,
+            amount: paymentResponse.transaction_amount,
+            currency: paymentResponse.currency_id,
+            merchant_order_id: paymentResponse.order?.id,
+            transaction_id: paymentResponse.id,
           };
 
-          // Update subscription in database
-          await admin
-            .firestore()
-            .collection("subscriptions")
-            .doc(userId)
-            .set(subscriptionData, { merge: true });
-
-          // Record payment in database
-          await admin.firestore().collection("payments").add({
-            userId,
-            planId,
-            paymentId,
-            amount: payment.transaction_amount,
-            currency: payment.currency_id,
-            status: "completed",
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          });
+          await savePaymentToFirebase(paymentData, "webhook");
         }
+      } catch (mpError) {
+        console.error("Error getting payment from MercadoPago:", mpError);
       }
     }
 
@@ -136,56 +230,60 @@ app.post("/api/webhook", async (req, res) => {
 // Endpoint para registrar pago desde el frontend tras redirección exitosa
 app.get("/api/register-payment", async (req, res) => {
   try {
+    console.log("Register payment endpoint called with:", req.query);
     const {
       payment_id,
       status,
-      external_reference,
       merchant_order_id,
       user_id,
       plan_id,
+      user_email,
     } = req.query;
+
     if (!payment_id || !user_id || !plan_id) {
-      return res.status(400).json({ error: "Missing required params" });
+      return res
+        .status(400)
+        .json({
+          error: "Missing required params: payment_id, user_id, plan_id",
+        });
     }
 
-    // Simula obtener detalles del pago desde MercadoPago si es necesario
-    // const payment = await client.payment.get({ id: payment_id });
+    // Try to get additional payment info from MercadoPago
+    let amount = 0;
+    let currency = "ARS";
 
-    // Crea la suscripción y el registro de pago
-    const subscriptionData = {
-      userId: user_id,
-      planId: plan_id,
-      status: "active",
-      paymentId: payment_id,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+    try {
+      const paymentResponse = await payment.get({ id: payment_id });
+      if (paymentResponse) {
+        amount = paymentResponse.transaction_amount || 0;
+        currency = paymentResponse.currency_id || "ARS";
+      }
+    } catch (mpError) {
+      console.warn(
+        "Could not get payment details from MercadoPago:",
+        mpError.message
+      );
+    }
+
+    const paymentData = {
+      user_id,
+      plan_id,
+      user_email,
+      payment_id,
+      status: status || "completed",
+      amount,
+      currency,
+      merchant_order_id,
+      transaction_id: payment_id,
     };
-    await admin
-      .firestore()
-      .collection("subscriptions")
-      .doc(user_id)
-      .set(subscriptionData, { merge: true });
-    await admin
-      .firestore()
-      .collection("payments")
-      .add({
-        userId: user_id,
-        planId: plan_id,
-        paymentId: payment_id,
-        amount: null, // Si quieres puedes obtener el monto desde MercadoPago
-        currency: "ARS",
-        status: status || "completed",
-        merchantOrderId: merchant_order_id || null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-    // Redirige al frontend después de registrar el pago
-    const frontendSuccessUrl =
-      process.env.SUCCESS_URL ||
-      "http://localhost:5173/payment/success";
-    return res.redirect(
-      `${frontendSuccessUrl}?payment_id=${payment_id}&status=${status}&user_id=${user_id}&plan_id=${plan_id}`
-    );
+
+    const saved = await savePaymentToFirebase(paymentData, "frontend");
+
+    if (saved) {
+      res.json({ success: true, message: "Payment registered successfully" });
+    } else {
+      res.status(500).json({ error: "Failed to save payment to Firebase" });
+    }
   } catch (error) {
     console.error("Error registering payment from frontend:", error);
     res.status(500).json({ error: error.message });
