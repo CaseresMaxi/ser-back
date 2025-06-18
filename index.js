@@ -129,11 +129,38 @@ async function savePaymentToFirebase(paymentData, source = "webhook") {
       return false;
     }
 
-    // Define plan names and pricing
+    // Define plan names, pricing, duration and features
     const planInfo = {
-      basic: { name: "Plan Básico", price: 4999 },
-      premium: { name: "Plan Premium", price: 9999 },
-      professional: { name: "Plan Profesional", price: 14999 },
+      basic: {
+        name: "Plan Básico",
+        price: 100,
+        duration: 30, // days
+        features: [
+          "Acceso a 100 preguntas premium",
+          "Quizzes personalizados",
+          "Acceso por 30 días",
+        ],
+      },
+      premium: {
+        name: "Plan Premium",
+        price: 4999,
+        duration: 90, // days
+        features: [
+          "Acceso ilimitado a todas las preguntas",
+          "Quizzes personalizados avanzados",
+          "Acceso por 90 días",
+        ],
+      },
+      professional: {
+        name: "Plan Profesional",
+        price: 9999,
+        duration: 365, // days
+        features: [
+          "Acceso ilimitado a todas las preguntas",
+          "Quizzes personalizados avanzados",
+          "Acceso por 1 año",
+        ],
+      },
     };
 
     const currentPlan = planInfo[plan_id] || {
@@ -183,17 +210,36 @@ async function savePaymentToFirebase(paymentData, source = "webhook") {
 
     // Update subscription if payment is approved/completed
     if (status === "approved" || status === "completed") {
+      // Calculate expiration date based on plan duration
+      const now = new Date();
+      const expiresAt = new Date(
+        now.getTime() + currentPlan.duration * 24 * 60 * 60 * 1000
+      );
+
+      console.log("Creating subscription with expiration:", {
+        planId: plan_id,
+        duration: currentPlan.duration,
+        createdAt: now,
+        expiresAt: expiresAt,
+        daysFromNow: Math.ceil((expiresAt - now) / (1000 * 60 * 60 * 24)),
+      });
+
       const subscriptionData = {
         userId: user_id,
         userEmail: user_email || null,
         planId: plan_id,
         planName: currentPlan.name,
         status: "active",
+        price: currentPlan.price,
+        duration: currentPlan.duration,
+        expiresAt: expiresAt,
+        createdAt: now,
+        updatedAt: now,
+        autoRenew: false,
+        features: currentPlan.features,
         paymentId: payment_id,
         amount: paymentDoc.amount,
         currency: paymentDoc.currency,
-        createdAt: new Date(),
-        updatedAt: new Date(),
         metadata: {
           paymentRef: paymentRef.id,
           source: source,
@@ -206,7 +252,14 @@ async function savePaymentToFirebase(paymentData, source = "webhook") {
         .doc(user_id)
         .set(subscriptionData, { merge: true });
 
-      console.log("Subscription updated successfully for user:", user_id);
+      console.log("Subscription created successfully for user:", user_id);
+      console.log("Subscription details:", {
+        planId: plan_id,
+        planName: currentPlan.name,
+        duration: currentPlan.duration,
+        expiresAt: expiresAt.toISOString(),
+        features: currentPlan.features,
+      });
     }
 
     return true;
