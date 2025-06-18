@@ -358,7 +358,7 @@ app.get("/api/register-payment", async (req, res) => {
       // Redirect to frontend success page with payment info
       const frontendSuccessUrl = `${
         process.env.FRONTEND_URL || "https://sage-mousse-8a7afe.netlify.app"
-      }/payment/success?payment_id=${actualPaymentId}&status=${actualStatus}&plan_id=${plan_id}`;
+      }`; // /payment/success?payment_id=${actualPaymentId}&status=${actualStatus}&plan_id=${plan_id}
       res.redirect(frontendSuccessUrl);
     } else {
       res.status(500).json({ error: "Failed to save payment to Firebase" });
