@@ -357,7 +357,7 @@ app.get("/api/register-payment", async (req, res) => {
     if (saved) {
       // Redirect to frontend success page with payment info
       const frontendSuccessUrl = `${
-        process.env.FRONTEND_URL || "http://localhost:5173"
+        process.env.FRONTEND_URL || "https://sage-mousse-8a7afe.netlify.app"
       }/payment/success?payment_id=${actualPaymentId}&status=${actualStatus}&plan_id=${plan_id}`;
       res.redirect(frontendSuccessUrl);
     } else {
